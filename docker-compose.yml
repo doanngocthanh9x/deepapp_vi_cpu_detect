@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  detectapi:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./static:/app/static
+    environment:
+      - PYTHONUNBUFFERED=1
