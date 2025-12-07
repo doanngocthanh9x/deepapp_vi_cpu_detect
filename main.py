@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from ultralytics import YOLO
 import os
@@ -103,6 +104,14 @@ conn.close()
 
 # Initialize PaddleOCR processor
 ocr_processor = PaddleOCRProcessor()
+@app.get("/download-models/{id}")
+async def download_model(id: str):  
+    rec = get_model_record_by_key(id)
+    if rec:
+        file_path = os.path.join(MODELS_DIR, rec['filename'])
+        if os.path.exists(file_path):
+            return FileResponse(file_path, media_type='application/octet-stream', filename=rec['filename'])
+    raise HTTPException(status_code=404, detail="Model not found")
 @app.get("/models")
 async def list_models():
     conn = sqlite3.connect(MODELS_DB)
@@ -221,6 +230,61 @@ async def detect(model_key: str, file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/multi-ocr")
+async def multi_ocr_detect(files: list[UploadFile] = File(...)):
+    results = []
+    for file in files:
+        if not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+    
+        try:
+            # Read image
+            image_data = await file.read()
+            image = Image.open(io.BytesIO(image_data))
+            
+            # Convert PIL image to RGB if necessary (remove alpha channel, convert to RGB)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            # Convert PIL image to numpy array for PaddleOCR
+            image_np = np.array(image)
+            
+            # Convert RGB to BGR for OpenCV (should be safe now)
+            image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+            
+            # Process with PaddleOCR
+            result = ocr_processor.process_full_image(image_np)
+            
+            # Format results similar to YOLO detection
+            detections = []
+            for i, (text, confidence, bbox) in enumerate(zip(result['texts'], result['confidences'], result['bboxes'])):
+                # Convert polygon bbox to xyxy format for consistency
+                yolo_bbox = ocr_processor.convert_paddle_bbox_to_yolo(bbox)
+                # Ensure yolo_bbox is a Python list with float values
+                yolo_bbox = [float(x) for x in yolo_bbox]
+                
+                # Handle confidence - it might be a list or single value
+                if isinstance(confidence, (list, tuple, np.ndarray)) and len(confidence) > 0:
+                    # Take the average confidence if it's a list/array
+                    avg_confidence = float(sum(float(c) for c in confidence) / len(confidence))
+                elif isinstance(confidence, (list, tuple, np.ndarray)) and len(confidence) == 0:
+                    avg_confidence = 0.0
+                else:
+                    avg_confidence = float(confidence) if confidence is not None else 0.0
+                
+                detections.append({
+                    "class": int(0),  # Single class for text
+                    "class_name": "text",
+                    "confidence": avg_confidence,
+                    "bbox": [yolo_bbox],
+                    "text": str(text) if text else ""  # Ensure text is string
+                })
+        
+        
+            results.append({"filename": file.filename, "detections": detections})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    return {"results": results}
 @app.post("/ocr")
 async def ocr_detect(file: UploadFile = File(...)):
     # Validate file type
@@ -273,6 +337,7 @@ async def ocr_detect(file: UploadFile = File(...)):
         return {"detections": detections}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
 
 if __name__ == "__main__":
     import uvicorn
